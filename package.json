@@ -1,0 +1,12 @@
+{
+  "name": "@botnexusai/agent-skills",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Validation tooling for the Veridian Labs Agent Skills collection",
+  "scripts": {
+    "validate": "node scripts/validate-skills.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

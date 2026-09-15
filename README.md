@@ -26,6 +26,12 @@ Install one skill globally:
 npx skills add BotNexusAI/agent-skills --skill <skill-name> --global
 ```
 
+For the Linear workflow specifically:
+
+```bash
+npx skills add BotNexusAI/agent-skills --skill linear-ops
+```
+
 Individual skills are also discoverable through [skills.sh](https://skills.sh/BotNexusAI/agent-skills) after they are published and used.
 
 ## Repository layout

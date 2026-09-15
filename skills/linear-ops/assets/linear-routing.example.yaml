@@ -1,0 +1,88 @@
+version: 1
+
+workspace:
+  name: Example Workspace
+
+defaults:
+  team:
+    key: EXM
+    name: Example Team
+  domain: product
+
+statuses:
+  triage: Triage
+  ready: Ready
+  in_progress: In Progress
+  waiting: Waiting for decision
+  blocked: Blocked
+  done: Done
+  canceled: Canceled
+
+priorities:
+  urgent: Urgent
+  high: High
+  medium: Medium
+  low: Low
+  none: No priority
+
+ticket_types:
+  feature:
+    labels: [feature]
+    default_priority: Medium
+    default_status: Triage
+  bug:
+    labels: [bug]
+    default_priority: High
+    default_status: Triage
+  chore:
+    labels: [chore]
+    default_priority: Low
+    default_status: Triage
+  research:
+    labels: [research]
+    default_priority: Medium
+    default_status: Triage
+  spike:
+    labels: [spike]
+    default_priority: Medium
+    default_status: Triage
+  decision:
+    labels: [decision]
+    default_priority: High
+    default_status: Waiting for decision
+  ops:
+    labels: [ops]
+    default_priority: Medium
+    default_status: Triage
+
+domains:
+  product:
+    project: Example Product
+    repos: []
+    labels: [product]
+  platform:
+    project: Example Platform
+    repos: []
+    labels: [platform]
+
+dashboard_views:
+  - name: Active work
+    purpose: Open work currently moving through the workspace.
+    filters:
+      state: open
+  - name: Waiting or blocked
+    purpose: Work needing an external dependency or decision.
+    filters:
+      state: open
+      labels: [blocked, needs-decision]
+  - name: Recently completed
+    purpose: Recently completed work for the operating review.
+    filters:
+      state: completed
+
+approval_gates:
+  create_many_issues: 5
+  modify_projects: true
+  modify_workflows: true
+  set_urgent: true
+  close_or_cancel: true

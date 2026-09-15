@@ -1,0 +1,12 @@
+tickets:
+  - key: SEED-001
+    title: Define the first product outcome
+    domain: product
+    type: feature
+    summary: Describe the user-visible outcome and how it will be verified.
+    status: Triage
+    priority: Medium
+    labels: [example]
+    tasks:
+      - Write the acceptance criteria
+      - Identify the verification path

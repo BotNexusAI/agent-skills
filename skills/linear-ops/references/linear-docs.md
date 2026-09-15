@@ -66,10 +66,7 @@ Official docs relevant to the Linear operating layer.
 
 ## Collaboration And Hosting
 
-- Linear is a hosted SaaS product; teams do not need to host Linear to
-  collaborate with team members.
-- Team members collaborate by joining the Linear workspace, receiving access to
-  relevant teams/projects, and using comments, mentions, assignments, project
-  updates, and views.
-- If self-hosting or data-residency control becomes mandatory, evaluate Plane as
-  the project-management fallback rather than trying to self-host Linear.
+Linear is a hosted SaaS product; teams do not need to host Linear to
+collaborate with team members. Team members collaborate by joining the Linear
+workspace, receiving access to relevant teams/projects, and using comments,
+mentions, assignments, project updates, and views.

@@ -41,6 +41,16 @@ REQUIRED_TOP_LEVEL = {
     "approval_gates",
 }
 
+SUPPORTED_VIEW_FILTERS = {
+    "assignee",
+    "labels",
+    "priority",
+    "project",
+    "state",
+    "team",
+    "unassigned",
+}
+
 PRIORITY_TO_INT = {
     "Urgent": 1,
     "High": 2,
@@ -89,6 +99,9 @@ def load_seed_tickets(path: Path | None) -> list[dict[str, Any]]:
         for key in ("title", "domain", "type", "summary"):
             if key not in ticket:
                 raise SystemExit(f"Seed ticket #{idx} missing {key!r}")
+        for key in ("labels", "tasks"):
+            if key in ticket and not isinstance(ticket[key], list):
+                raise SystemExit(f"Seed ticket #{idx} {key!r} must be a list")
     return tickets
 
 
@@ -98,6 +111,20 @@ def validate_config(data: dict[str, Any]) -> list[str]:
     if missing:
         errors.append(f"Missing top-level keys: {', '.join(missing)}")
 
+    workspace = data.get("workspace")
+    if not isinstance(workspace, dict) or not str(workspace.get("name", "")).strip():
+        errors.append("workspace must include a non-empty name")
+
+    defaults = data.get("defaults")
+    if not isinstance(defaults, dict):
+        errors.append("defaults must be a mapping")
+    else:
+        team = defaults.get("team")
+        if not isinstance(team, dict) or not (
+            str(team.get("key", "")).strip() or str(team.get("name", "")).strip()
+        ):
+            errors.append("defaults.team must include key or name")
+
     domains = data.get("domains")
     if not isinstance(domains, dict) or not domains:
         errors.append("domains must be a non-empty mapping")
@@ -106,9 +133,40 @@ def validate_config(data: dict[str, Any]) -> list[str]:
             if not isinstance(domain, dict):
                 errors.append(f"domain {name!r} must be a mapping")
                 continue
-            for key in ("project", "labels"):
+            for key in ("labels",):
                 if key not in domain:
                     errors.append(f"domain {name!r} missing {key!r}")
+            if not str(domain.get("project") or domain.get("planned_project") or "").strip():
+                errors.append(f"domain {name!r} must include project or planned_project")
+            for key in ("labels", "repos"):
+                if key in domain and not isinstance(domain[key], list):
+                    errors.append(f"domain {name!r} {key!r} must be a list")
+                elif key in domain and any(not isinstance(value, str) for value in domain[key]):
+                    errors.append(f"domain {name!r} {key!r} must contain only strings")
+
+    if isinstance(defaults, dict):
+        default_domain = defaults.get("domain")
+        if default_domain and not isinstance(default_domain, str):
+            errors.append("defaults.domain must be a string")
+        elif default_domain and isinstance(domains, dict) and default_domain not in domains:
+            errors.append(f"defaults.domain {default_domain!r} is not configured")
+
+    for section in ("statuses", "priorities", "ticket_types", "approval_gates"):
+        if section in data and not isinstance(data[section], dict):
+            errors.append(f"{section} must be a mapping")
+
+    ticket_types = data.get("ticket_types")
+    if isinstance(ticket_types, dict):
+        for name, ticket_type in ticket_types.items():
+            if not isinstance(ticket_type, dict):
+                errors.append(f"ticket type {name!r} must be a mapping")
+                continue
+            if "labels" in ticket_type and not isinstance(ticket_type["labels"], list):
+                errors.append(f"ticket type {name!r} labels must be a list")
+            elif "labels" in ticket_type and any(
+                not isinstance(value, str) for value in ticket_type["labels"]
+            ):
+                errors.append(f"ticket type {name!r} labels must contain only strings")
 
     dashboard_views = data.get("dashboard_views")
     if not isinstance(dashboard_views, list) or not dashboard_views:
@@ -117,13 +175,25 @@ def validate_config(data: dict[str, Any]) -> list[str]:
         for idx, view in enumerate(dashboard_views, start=1):
             if not isinstance(view, dict) or "name" not in view:
                 errors.append(f"dashboard view #{idx} must include name")
+                continue
+            filters = view.get("filters", {})
+            if not isinstance(filters, dict):
+                errors.append(f"dashboard view #{idx} filters must be a mapping")
+                continue
+            unknown = sorted(set(filters) - SUPPORTED_VIEW_FILTERS)
+            if unknown:
+                errors.append(
+                    f"dashboard view #{idx} has unsupported filters: {', '.join(unknown)}"
+                )
 
     return errors
 
 
 def pick_domain(data: dict[str, Any], domain_name: str | None) -> tuple[str, dict[str, Any]]:
     domains = data.get("domains", {})
-    if domain_name and domain_name in domains:
+    if domain_name:
+        if domain_name not in domains:
+            raise SystemExit(f"Unknown domain {domain_name!r}; choose from: {', '.join(domains)}")
         return domain_name, domains[domain_name]
     default_domain = data.get("defaults", {}).get("domain")
     if default_domain in domains:
@@ -142,13 +212,25 @@ def default_labels(data: dict[str, Any], ticket_type: str) -> list[str]:
     return labels
 
 
-def token_from_env(env_var: str) -> str:
-    token = os.environ.get(env_var, "").strip()
+def token_from_env() -> str:
+    token = os.environ.get("LINEAR_API_KEY", "").strip()
     if not token:
         raise SystemExit(
-            f"Missing {env_var}. Export a Linear API key in this shell, or use Linear MCP."
+            "Missing LINEAR_API_KEY. Export a Linear API key in this shell, or use Linear MCP."
         )
     return token
+
+
+def parse_timestamp(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def linear_request(token: str, query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -195,6 +277,14 @@ def issue_is_open(issue: dict[str, Any]) -> bool:
     return state_type not in {"completed", "canceled"} and state_name not in {"done", "canceled"}
 
 
+def issue_is_completed(issue: dict[str, Any]) -> bool:
+    state = issue.get("state") or {}
+    return (
+        (state.get("type") or "").casefold() == "completed"
+        or (state.get("name") or "").casefold() == "done"
+    )
+
+
 def issue_priority_name(issue: dict[str, Any]) -> str:
     return INT_TO_PRIORITY.get(issue.get("priority"), str(issue.get("priority", "")))
 
@@ -222,6 +312,77 @@ def issue_is_customer_facing(issue: dict[str, Any]) -> bool:
     return issue_has_label(issue, "customer-facing")
 
 
+def filter_values(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else [value]
+
+
+def value_matches(actual: Any, expected: Any) -> bool:
+    actual_text = str(actual or "").casefold()
+    return any(
+        actual_text == str(candidate or "").casefold()
+        for candidate in filter_values(expected)
+    )
+
+
+def issue_matches_view(issue: dict[str, Any], filters: dict[str, Any]) -> bool:
+    state = issue.get("state") or {}
+    team = issue.get("team") or {}
+    project = issue.get("project") or {}
+    assignee = issue.get("assignee") or {}
+    for key, expected in filters.items():
+        if key == "state":
+            if any(str(value).casefold() == "open" for value in filter_values(expected)):
+                if not issue_is_open(issue):
+                    return False
+            elif not (
+                value_matches(state.get("name"), expected)
+                or value_matches(state.get("type"), expected)
+            ):
+                return False
+        elif key == "labels":
+            expected_labels = {str(value).casefold() for value in filter_values(expected)}
+            issue_labels = {name.casefold() for name in issue_label_names(issue)}
+            if not expected_labels.intersection(issue_labels):
+                return False
+        elif key == "priority":
+            if not (
+                value_matches(issue_priority_name(issue), expected)
+                or value_matches(issue.get("priority"), expected)
+            ):
+                return False
+        elif key == "project":
+            if not value_matches(project.get("name"), expected):
+                return False
+        elif key == "team":
+            if not (
+                value_matches(team.get("key"), expected)
+                or value_matches(team.get("name"), expected)
+            ):
+                return False
+        elif key == "assignee":
+            if not (
+                value_matches(assignee.get("name"), expected)
+                or value_matches(assignee.get("email"), expected)
+            ):
+                return False
+        elif key == "unassigned":
+            is_unassigned = not assignee.get("id") and not assignee.get("name")
+            if bool(expected) != is_unassigned:
+                return False
+    return True
+
+
+def issues_for_dashboard(data: dict[str, Any], issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    views = data.get("dashboard_views", [])
+    if not views:
+        return issues
+    return [
+        issue
+        for issue in issues
+        if any(issue_matches_view(issue, view.get("filters", {}) or {}) for view in views)
+    ]
+
+
 def priority_to_int(priority: str | int | None) -> int:
     if isinstance(priority, int):
         return priority
@@ -234,6 +395,10 @@ def issue_sort_key(issue: dict[str, Any]) -> tuple[int, str]:
     priority = issue.get("priority")
     priority_rank = priority if isinstance(priority, int) and priority > 0 else 99
     return (priority_rank, issue.get("updatedAt") or "")
+
+
+def recent_issue_sort_key(issue: dict[str, Any]) -> str:
+    return issue.get("updatedAt") or ""
 
 
 def print_issue_line(issue: dict[str, Any]) -> None:
@@ -270,7 +435,7 @@ def issue_summary(issue: dict[str, Any]) -> dict[str, str]:
 def fetch_recent_issues(token: str, first: int) -> list[dict[str, Any]]:
     query = """
     query LinearOpsRecentIssues($first: Int!) {
-      issues(first: $first) {
+      issues(first: $first, orderBy: updatedAt) {
         nodes {
           id
           identifier
@@ -337,7 +502,11 @@ def seed_ticket_to_issue(data: dict[str, Any], ticket: dict[str, Any], idx: int)
             "name": data["defaults"]["team"].get("name"),
         },
         "project": {"id": f"seed-project-{domain_name}", "name": domain.get("project")},
-        "assignee": {"id": "seed-assignee", "name": ticket.get("assignee") or "Unassigned", "email": ""},
+        "assignee": (
+            {"id": "seed-assignee", "name": str(ticket["assignee"]), "email": ""}
+            if ticket.get("assignee")
+            else {"id": None, "name": None, "email": ""}
+        ),
         "labels": {"nodes": [{"id": f"seed-label-{label}", "name": label} for label in labels]},
         "seed": ticket,
     }
@@ -353,6 +522,14 @@ def html_attr(value: Any) -> str:
 
 def html_text(value: Any) -> str:
     return html.escape(str(value))
+
+
+def safe_http_url(value: Any) -> str:
+    candidate = str(value or "").strip()
+    parsed = urllib.parse.urlparse(candidate)
+    if parsed.scheme.casefold() in {"http", "https"} and parsed.netloc:
+        return candidate
+    return ""
 
 
 def write_output(content: str, output: Path | None) -> None:
@@ -372,10 +549,11 @@ def issue_card_html(issue: dict[str, Any]) -> str:
     summary = issue_summary(issue)
     title = html_text(summary["title"])
     identifier = html_text(summary["identifier"])
-    url = html_attr(summary["url"])
+    safe_url = safe_http_url(summary["url"])
+    url = html_attr(safe_url)
     labels = html_text(summary["labels"])
     label_html = f'<div class="labels">{labels}</div>' if labels else ""
-    if summary["url"]:
+    if safe_url:
         heading = f'<a href="{url}">{identifier} {title}</a>'
     else:
         heading = f"{identifier} {title}".strip()
@@ -404,6 +582,7 @@ def render_dashboard_html(
     domains = data.get("domains", {})
     views = data.get("dashboard_views", [])
     open_issues = [issue for issue in issues if issue_is_open(issue)]
+    completed = [issue for issue in issues if issue_is_completed(issue)]
 
     def render_issue_list(section_issues: list[dict[str, Any]], empty: str) -> str:
         if not section_issues:
@@ -428,7 +607,9 @@ def render_dashboard_html(
         updated = issue.get("updatedAt")
         if not updated:
             continue
-        updated_at = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+        updated_at = parse_timestamp(updated)
+        if not updated_at:
+            continue
         if (now - updated_at).days > stale_days:
             stale.append(issue)
 
@@ -446,8 +627,8 @@ def render_dashboard_html(
         status_text = "Seed ticket preview"
         command_html = (
             "Linear MCP is not connected here yet. This dashboard shows the seed "
-            "The seed backlog is mapped through the routing config. Regenerate with --live "
-            "after MCP auth or LINEAR_API_KEY."
+            "backlog mapped through the routing config. Regenerate with --live after "
+            "MCP auth or LINEAR_API_KEY."
         )
         issue_count_label = "seed issues loaded"
         command_heading = "Seed Command Dashboard"
@@ -457,8 +638,8 @@ def render_dashboard_html(
             "Linear MCP is not connected here yet. This dashboard shows the configured "
             "operating model and will render live data after MCP auth or LINEAR_API_KEY."
         )
-        issue_count_label = "open live issues loaded"
-        command_heading = "Live Command Dashboard"
+        issue_count_label = "issues loaded"
+        command_heading = "Configuration Command Dashboard"
 
     domain_rows = []
     for name, domain in domains.items():
@@ -663,6 +844,9 @@ def render_dashboard_html(
     <h2>Stale Open Work</h2>
     {render_issue_list(sorted(stale, key=issue_sort_key), "No stale live issues loaded.")}
 
+    <h2>Recently Completed Work</h2>
+    {render_issue_list(sorted(completed, key=recent_issue_sort_key, reverse=True), "No recently completed issues loaded.")}
+
     <h2>Routing Domains</h2>
     <table>
       <thead>
@@ -690,7 +874,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 
 def cmd_api_check(args: argparse.Namespace) -> int:
-    token = token_from_env(args.token_env)
+    token = token_from_env()
     query = """
     query LinearOpsHealth {
       viewer { id name email }
@@ -708,7 +892,7 @@ def cmd_api_check(args: argparse.Namespace) -> int:
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
-    token = token_from_env(args.token_env)
+    token = token_from_env()
     query = """
     query LinearOpsDiscovery {
       viewer { id name email }
@@ -771,7 +955,7 @@ def cmd_dashboard_spec(args: argparse.Namespace) -> int:
 
 
 def cmd_dashboard_live(args: argparse.Namespace) -> int:
-    token = token_from_env(args.token_env)
+    token = token_from_env()
     data = load_config(args.config)
     errors = validate_config(data)
     if errors:
@@ -779,7 +963,8 @@ def cmd_dashboard_live(args: argparse.Namespace) -> int:
             print(f"ERROR: {error}")
         return 1
 
-    issues = [issue for issue in fetch_recent_issues(token, args.limit) if issue_is_open(issue)]
+    issues = issues_for_dashboard(data, fetch_recent_issues(token, args.limit))
+    open_issues = [issue for issue in issues if issue_is_open(issue)]
     now = datetime.now(timezone.utc)
 
     print(f"# {data['workspace']['name']} Linear Dashboard")
@@ -788,7 +973,7 @@ def cmd_dashboard_live(args: argparse.Namespace) -> int:
     print("## Command Dashboard")
     print()
     by_project: dict[str, list[dict[str, Any]]] = {}
-    for issue in issues:
+    for issue in open_issues:
         project_name = (issue.get("project") or {}).get("name") or "No project"
         by_project.setdefault(project_name, []).append(issue)
     for project_name in sorted(by_project):
@@ -801,7 +986,7 @@ def cmd_dashboard_live(args: argparse.Namespace) -> int:
     print()
     waiting = [
         issue
-        for issue in issues
+        for issue in open_issues
         if issue_is_waiting_or_blocked(issue)
     ]
     for issue in sorted(waiting, key=issue_sort_key)[: args.per_section]:
@@ -814,7 +999,7 @@ def cmd_dashboard_live(args: argparse.Namespace) -> int:
     print()
     agent_ready = [
         issue
-        for issue in issues
+        for issue in open_issues
         if issue_is_agent_ready(issue)
     ]
     for issue in sorted(agent_ready, key=issue_sort_key)[: args.per_section]:
@@ -826,7 +1011,7 @@ def cmd_dashboard_live(args: argparse.Namespace) -> int:
     print("## Customer-Facing Work")
     print()
     customer = [
-        issue for issue in issues if issue_is_customer_facing(issue)
+        issue for issue in open_issues if issue_is_customer_facing(issue)
     ]
     for issue in sorted(customer, key=issue_sort_key)[: args.per_section]:
         print_issue_line(issue)
@@ -834,15 +1019,26 @@ def cmd_dashboard_live(args: argparse.Namespace) -> int:
         print("- None found.")
     print()
 
+    print("## Recently Completed Work")
+    print()
+    completed = [issue for issue in issues if issue_is_completed(issue)]
+    for issue in sorted(completed, key=recent_issue_sort_key, reverse=True)[: args.per_section]:
+        print_issue_line(issue)
+    if not completed:
+        print("- None found.")
+    print()
+
     stale_days = args.stale_days
     print(f"## Stale Open Work (>{stale_days} days)")
     print()
     stale = []
-    for issue in issues:
+    for issue in open_issues:
         updated = issue.get("updatedAt")
         if not updated:
             continue
-        updated_at = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+        updated_at = parse_timestamp(updated)
+        if not updated_at:
+            continue
         if (now - updated_at).days > stale_days:
             stale.append(issue)
     for issue in sorted(stale, key=issue_sort_key)[: args.per_section]:
@@ -863,11 +1059,13 @@ def cmd_dashboard_html(args: argparse.Namespace) -> int:
     issues: list[dict[str, Any]] = []
     mode = "spec"
     if args.live:
-        token = token_from_env(args.token_env)
-        issues = [issue for issue in fetch_recent_issues(token, args.limit) if issue_is_open(issue)]
+        token = token_from_env()
+        issues = issues_for_dashboard(data, fetch_recent_issues(token, args.limit))
         mode = "live"
     elif args.seed:
-        issues = seed_tickets_to_issues(data, load_seed_tickets(args.seed))
+        issues = issues_for_dashboard(
+            data, seed_tickets_to_issues(data, load_seed_tickets(args.seed))
+        )
         mode = "seed"
 
     content = render_dashboard_html(
@@ -913,7 +1111,11 @@ def ticket_url_from_fields(
         "description": description,
         "team": team,
         "status": status,
-        "priority": priority,
+        "priority": (
+            str(priority).casefold()
+            if str(priority).casefold() in {"urgent", "high", "medium", "low"}
+            else ""
+        ),
         "labels": ",".join(labels),
         "project": domain.get("project", ""),
     }
@@ -945,7 +1147,8 @@ def cmd_draft_ticket(args: argparse.Namespace) -> int:
     print("|---|---|")
     print(f"| Type | {ticket_type} |")
     print(f"| Domain | {domain_name} |")
-    print(f"| Team | {data['defaults']['team']['name']} |")
+    team = data["defaults"]["team"]
+    print(f"| Team | {team.get('name') or team.get('key')} |")
     print(f"| Project | {project_display} |")
     print(f"| Status | {status} |")
     print(f"| Priority | {priority} |")
@@ -1111,11 +1314,9 @@ def build_parser() -> argparse.ArgumentParser:
     validate.set_defaults(func=cmd_validate)
 
     api_check = sub.add_parser("api-check", help="verify Linear API token")
-    api_check.add_argument("--token-env", default="LINEAR_API_KEY")
     api_check.set_defaults(func=cmd_api_check)
 
     discover = sub.add_parser("discover", help="list Linear teams, states, projects, and labels")
-    discover.add_argument("--token-env", default="LINEAR_API_KEY")
     discover.set_defaults(func=cmd_discover)
 
     dashboard = sub.add_parser("dashboard-spec", help="render dashboard views")
@@ -1124,7 +1325,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     live_dashboard = sub.add_parser("dashboard-live", help="render dashboard from live Linear issues")
     live_dashboard.add_argument("--config", type=Path, required=True)
-    live_dashboard.add_argument("--token-env", default="LINEAR_API_KEY")
     live_dashboard.add_argument("--limit", type=int, default=100)
     live_dashboard.add_argument("--per-section", type=int, default=10)
     live_dashboard.add_argument("--stale-days", type=int, default=14)
@@ -1133,9 +1333,9 @@ def build_parser() -> argparse.ArgumentParser:
     html_dashboard = sub.add_parser("dashboard-html", help="render dashboard HTML")
     html_dashboard.add_argument("--config", type=Path, required=True)
     html_dashboard.add_argument("--output", type=Path)
-    html_dashboard.add_argument("--live", action="store_true")
-    html_dashboard.add_argument("--seed", type=Path)
-    html_dashboard.add_argument("--token-env", default="LINEAR_API_KEY")
+    dashboard_source = html_dashboard.add_mutually_exclusive_group()
+    dashboard_source.add_argument("--live", action="store_true")
+    dashboard_source.add_argument("--seed", type=Path)
     html_dashboard.add_argument("--limit", type=int, default=100)
     html_dashboard.add_argument("--per-section", type=int, default=10)
     html_dashboard.add_argument("--stale-days", type=int, default=14)

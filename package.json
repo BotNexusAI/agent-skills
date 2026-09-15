@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "description": "Validation tooling for the Veridian Labs Agent Skills collection",
   "scripts": {
-    "validate": "node scripts/validate-skills.mjs"
+    "validate": "node scripts/validate-skills.mjs",
+    "test": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'"
   },
   "engines": {
     "node": ">=20"

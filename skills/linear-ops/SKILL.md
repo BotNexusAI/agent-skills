@@ -17,6 +17,16 @@ available through the runtime. Do not read `.env` files. If no live Linear acces
 exists, produce a safe ticket draft and tell the user what authentication is
 needed.
 
+Authentication priority:
+
+1. Primary: use the host's authenticated Linear MCP connection for live reads
+   and writes supported by the available tools.
+2. Secondary: use the bundled helper's read-only GraphQL commands only when a
+   `LINEAR_API_KEY` is already present in the environment. Never ask the user
+   to paste a key into chat, read `.env` files, or persist the key.
+3. If neither path is available, stay in draft/specification mode and explain
+   what connection is needed.
+
 Capability modes:
 
 - `dry-run`: no auth; render dashboard spec and ticket drafts.
